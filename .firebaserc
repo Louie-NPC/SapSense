@@ -1,0 +1,14 @@
+{
+  "projects": {
+    "default": "sapsense-7b9b0"
+  },
+  "targets": {
+    "sapsense-7b9b0": {
+      "hosting": {
+        "sapsense": [
+          "sapsense"
+        ]
+      }
+    }
+  }
+}
