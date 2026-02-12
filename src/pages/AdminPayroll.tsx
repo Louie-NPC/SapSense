@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import AdminSidebar from '@/components/AdminSidebar';
 import DashboardHeader from '@/components/DashboardHeader';
 import { useAuth } from '@/contexts/AuthContext';
@@ -35,7 +35,8 @@ import {
   AlertTriangle,
   Filter,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  Loader2
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import {
@@ -46,6 +47,16 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { exportToPDF, generatePayslipPDF, generateAllPayslipsPDF, PayslipData } from '@/lib/exportUtils';
+import { 
+  payrollApi, 
+  payPeriodsApi, 
+  bonusDeductionsApi, 
+  employeesApi,
+  PayrollData, 
+  PayPeriodData, 
+  BonusDeductionData,
+  EmployeeData 
+} from '@/services/api';
 
 interface PayrollRecord {
   id: string;
@@ -53,6 +64,7 @@ interface PayrollRecord {
   farmerName: string;
   email: string;
   payPeriod: string;
+  payPeriodId?: string;
   baseHarvest: number;
   qualityBonus: number;
   deductions: number;
@@ -85,6 +97,46 @@ interface BonusDeduction {
   status: 'pending' | 'approved' | 'rejected';
 }
 
+// Helper functions to transform API data to frontend format
+const transformPayrollData = (data: PayrollData): PayrollRecord => ({
+  id: data.id,
+  farmerId: data.farmer_id,
+  farmerName: data.farmer_name,
+  email: data.email || '',
+  payPeriod: data.pay_period || '',
+  payPeriodId: data.pay_period_id,
+  baseHarvest: Number(data.base_harvest) || 0,
+  qualityBonus: Number(data.quality_bonus) || 0,
+  deductions: Number(data.deductions) || 0,
+  grossPay: Number(data.gross_pay) || 0,
+  netPay: Number(data.net_pay) || 0,
+  status: data.status,
+  paymentDate: data.payment_date || '',
+  paymentMethod: data.payment_method || 'Bank Transfer',
+});
+
+const transformPayPeriodData = (data: PayPeriodData): PayPeriod => ({
+  id: data.id,
+  name: data.name,
+  startDate: data.start_date,
+  endDate: data.end_date,
+  status: data.status,
+  totalPayroll: Number(data.total_payroll) || 0,
+  employeeCount: Number(data.employee_count) || 0,
+});
+
+const transformBonusDeductionData = (data: BonusDeductionData): BonusDeduction => ({
+  id: data.id,
+  farmerId: data.farmer_id,
+  farmerName: data.farmer_name,
+  type: data.type,
+  category: data.category || '',
+  amount: Number(data.amount) || 0,
+  description: data.description || '',
+  date: data.date || '',
+  status: data.status,
+});
+
 const AdminPayroll = () => {
   const { user } = useAuth();
   const { toast } = useToast();
@@ -106,156 +158,83 @@ const AdminPayroll = () => {
   const [schedulePaymentsDialog, setSchedulePaymentsDialog] = useState(false);
   const [scheduledDate, setScheduledDate] = useState('');
 
-  const [payPeriods, setPayPeriods] = useState<PayPeriod[]>([
-    {
-      id: 'period-1',
-      name: 'January 2024 - Week 4',
-      startDate: '2024-01-22',
-      endDate: '2024-01-28',
-      status: 'active',
-      totalPayroll: 45250.00,
-      employeeCount: 4
-    },
-    {
-      id: 'period-2',
-      name: 'January 2024 - Week 3',
-      startDate: '2024-01-15',
-      endDate: '2024-01-21',
-      status: 'closed',
-      totalPayroll: 42180.50,
-      employeeCount: 4
-    },
-    {
-      id: 'period-3',
-      name: 'January 2024 - Week 2',
-      startDate: '2024-01-08',
-      endDate: '2024-01-14',
-      status: 'closed',
-      totalPayroll: 38920.00,
-      employeeCount: 3
-    }
-  ]);
+  // Loading and error states
+  const [loading, setLoading] = useState(true);
+  const [actionLoading, setActionLoading] = useState<string | null>(null);
 
-  const [payrollRecords, setPayrollRecords] = useState<PayrollRecord[]>([
-    {
-      id: 'payroll-1',
-      farmerId: 'farmer-1',
-      farmerName: 'Juan Dela Cruz',
-      email: 'juan@example.com',
-      payPeriod: 'January 2024 - Week 4',
-      baseHarvest: 182,
-      qualityBonus: 850.00,
-      deductions: 150.00,
-      grossPay: 5400.00,
-      netPay: 6100.00,
-      status: 'pending',
-      paymentDate: '2024-01-29',
-      paymentMethod: 'Bank Transfer'
-    },
-    {
-      id: 'payroll-2',
-      farmerId: 'farmer-2',
-      farmerName: 'Maria Santos',
-      email: 'maria@example.com',
-      payPeriod: 'January 2024 - Week 4',
-      baseHarvest: 152.8,
-      qualityBonus: 620.00,
-      deductions: 0,
-      grossPay: 4584.00,
-      netPay: 5204.00,
-      status: 'processing',
-      paymentDate: '2024-01-29',
-      paymentMethod: 'Bank Transfer'
-    },
-    {
-      id: 'payroll-3',
-      farmerId: 'farmer-3',
-      farmerName: 'Pedro Garcia',
-      email: 'pedro@example.com',
-      payPeriod: 'January 2024 - Week 4',
-      baseHarvest: 168.4,
-      qualityBonus: 480.00,
-      deductions: 200.00,
-      grossPay: 5052.00,
-      netPay: 5332.00,
-      status: 'paid',
-      paymentDate: '2024-01-28',
-      paymentMethod: 'Cash'
-    },
-    {
-      id: 'payroll-4',
-      farmerId: 'farmer-4',
-      farmerName: 'Ana Reyes',
-      email: 'ana@example.com',
-      payPeriod: 'January 2024 - Week 4',
-      baseHarvest: 95,
-      qualityBonus: 180.00,
-      deductions: 350.00,
-      grossPay: 2850.00,
-      netPay: 2680.00,
-      status: 'on-hold',
-      paymentDate: '2024-01-29',
-      paymentMethod: 'Bank Transfer'
-    }
-  ]);
+  // Data states - fetched from PostgreSQL
+  const [payPeriods, setPayPeriods] = useState<PayPeriod[]>([]);
+  const [payrollRecords, setPayrollRecords] = useState<PayrollRecord[]>([]);
+  const [bonusDeductions, setBonusDeductions] = useState<BonusDeduction[]>([]);
+  const [employees, setEmployees] = useState<EmployeeData[]>([]);
 
-  const [bonusDeductions, setBonusDeductions] = useState<BonusDeduction[]>([
-    {
-      id: 'bd-1',
-      farmerId: 'farmer-1',
-      farmerName: 'Juan Dela Cruz',
-      type: 'bonus',
-      category: 'Performance',
-      amount: 500.00,
-      description: 'Exceeded monthly harvest target by 20%',
-      date: '2024-01-25',
-      status: 'approved'
-    },
-    {
-      id: 'bd-2',
-      farmerId: 'farmer-1',
-      farmerName: 'Juan Dela Cruz',
-      type: 'bonus',
-      category: 'Quality',
-      amount: 350.00,
-      description: 'Highest quality rating for the month',
-      date: '2024-01-25',
-      status: 'approved'
-    },
-    {
-      id: 'bd-3',
-      farmerId: 'farmer-3',
-      farmerName: 'Pedro Garcia',
-      type: 'deduction',
-      category: 'Equipment',
-      amount: 200.00,
-      description: 'Equipment damage - collection container',
-      date: '2024-01-20',
-      status: 'approved'
-    },
-    {
-      id: 'bd-4',
-      farmerId: 'farmer-4',
-      farmerName: 'Ana Reyes',
-      type: 'deduction',
-      category: 'Absence',
-      amount: 350.00,
-      description: 'Unexcused absence - 2 days',
-      date: '2024-01-18',
-      status: 'pending'
-    },
-    {
-      id: 'bd-5',
-      farmerId: 'farmer-2',
-      farmerName: 'Maria Santos',
-      type: 'bonus',
-      category: 'Attendance',
-      amount: 200.00,
-      description: 'Perfect attendance for the month',
-      date: '2024-01-26',
-      status: 'pending'
+  // Fetch all data from API
+  const fetchData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [payrollData, periodsData, bonusData, employeesData] = await Promise.all([
+        payrollApi.getAll(),
+        payPeriodsApi.getAll(),
+        bonusDeductionsApi.getAll(),
+        employeesApi.getAll(),
+      ]);
+
+      // Get active pay period
+      const activePeriod = periodsData.find(p => p.status === 'active');
+      
+      // Transform employees to payroll records, merging with existing payroll data
+      const employeePayroll: PayrollRecord[] = employeesData
+        .filter(emp => emp.status === 'active') // Only show active employees
+        .map(employee => {
+          // Find existing payroll record for this employee in the active period
+          const existingPayroll = payrollData.find(
+            p => p.farmer_id === employee.id && 
+                 (activePeriod ? p.pay_period_id === activePeriod.id : true)
+          );
+          
+          if (existingPayroll) {
+            return transformPayrollData(existingPayroll);
+          }
+          
+          // Create a default payroll record for employees without one
+          return {
+            id: `temp-${employee.id}`,
+            farmerId: employee.id,
+            farmerName: employee.name,
+            email: employee.email,
+            payPeriod: activePeriod?.name || 'Current Period',
+            payPeriodId: activePeriod?.id,
+            baseHarvest: Number(employee.total_harvest) || 0,
+            qualityBonus: 0,
+            deductions: 0,
+            grossPay: 0,
+            netPay: 0,
+            status: 'pending' as const,
+            paymentDate: '',
+            paymentMethod: 'Bank Transfer',
+          };
+        });
+
+      setPayrollRecords(employeePayroll);
+      setPayPeriods(periodsData.map(transformPayPeriodData));
+      setBonusDeductions(bonusData.map(transformBonusDeductionData));
+      setEmployees(employeesData);
+    } catch (error) {
+      console.error('Error fetching payroll data:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to fetch payroll data from server. Please ensure the backend is running.',
+        variant: 'destructive',
+      });
+    } finally {
+      setLoading(false);
     }
-  ]);
+  }, [toast]);
+
+  // Load data on mount
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
 
   const filteredRecords = payrollRecords.filter(record =>
     record.farmerName.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -292,37 +271,122 @@ const AdminPayroll = () => {
     }
   };
 
-  const handleProcessPayroll = (recordId: string) => {
-    setPayrollRecords(prev => prev.map(record => 
-      record.id === recordId ? { ...record, status: 'processing' as const } : record
-    ));
+  const handleProcessPayroll = async (recordId: string) => {
+    setActionLoading(recordId);
+    try {
+      await payrollApi.updateStatus(recordId, 'processing');
+      setPayrollRecords(prev => prev.map(record => 
+        record.id === recordId ? { ...record, status: 'processing' as const } : record
+      ));
+      toast({
+        title: 'Processing Started',
+        description: 'Payroll is now being processed.',
+      });
+    } catch (error) {
+      console.error('Error processing payroll:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to process payroll. Please try again.',
+        variant: 'destructive',
+      });
+    } finally {
+      setActionLoading(null);
+    }
   };
 
-  const handleMarkPaid = (recordId: string) => {
-    setPayrollRecords(prev => prev.map(record => 
-      record.id === recordId ? { ...record, status: 'paid' as const, paymentDate: new Date().toISOString().split('T')[0] } : record
-    ));
+  const handleMarkPaid = async (recordId: string) => {
+    setActionLoading(recordId);
+    try {
+      await payrollApi.updateStatus(recordId, 'paid');
+      setPayrollRecords(prev => prev.map(record => 
+        record.id === recordId ? { ...record, status: 'paid' as const, paymentDate: new Date().toISOString().split('T')[0] } : record
+      ));
+      toast({
+        title: 'Payment Complete',
+        description: 'Payroll has been marked as paid.',
+      });
+    } catch (error) {
+      console.error('Error marking paid:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to mark payment as paid. Please try again.',
+        variant: 'destructive',
+      });
+    } finally {
+      setActionLoading(null);
+    }
   };
 
-  const handleReleaseHold = (recordId: string) => {
-    setPayrollRecords(prev => prev.map(record => 
-      record.id === recordId ? { ...record, status: 'pending' as const } : record
-    ));
+  const handleReleaseHold = async (recordId: string) => {
+    setActionLoading(recordId);
+    try {
+      await payrollApi.updateStatus(recordId, 'pending');
+      setPayrollRecords(prev => prev.map(record => 
+        record.id === recordId ? { ...record, status: 'pending' as const } : record
+      ));
+      toast({
+        title: 'Hold Released',
+        description: 'Payroll hold has been released.',
+      });
+    } catch (error) {
+      console.error('Error releasing hold:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to release hold. Please try again.',
+        variant: 'destructive',
+      });
+    } finally {
+      setActionLoading(null);
+    }
   };
 
-  const handleApproveBonusDeduction = (bdId: string) => {
-    setBonusDeductions(prev => prev.map(bd => 
-      bd.id === bdId ? { ...bd, status: 'approved' as const } : bd
-    ));
+  const handleApproveBonusDeduction = async (bdId: string) => {
+    setActionLoading(bdId);
+    try {
+      await bonusDeductionsApi.updateStatus(bdId, 'approved');
+      setBonusDeductions(prev => prev.map(bd => 
+        bd.id === bdId ? { ...bd, status: 'approved' as const } : bd
+      ));
+      toast({
+        title: 'Approved',
+        description: 'Bonus/deduction has been approved.',
+      });
+    } catch (error) {
+      console.error('Error approving:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to approve. Please try again.',
+        variant: 'destructive',
+      });
+    } finally {
+      setActionLoading(null);
+    }
   };
 
-  const handleRejectBonusDeduction = (bdId: string) => {
-    setBonusDeductions(prev => prev.map(bd => 
-      bd.id === bdId ? { ...bd, status: 'rejected' as const } : bd
-    ));
+  const handleRejectBonusDeduction = async (bdId: string) => {
+    setActionLoading(bdId);
+    try {
+      await bonusDeductionsApi.updateStatus(bdId, 'rejected');
+      setBonusDeductions(prev => prev.map(bd => 
+        bd.id === bdId ? { ...bd, status: 'rejected' as const } : bd
+      ));
+      toast({
+        title: 'Rejected',
+        description: 'Bonus/deduction has been rejected.',
+      });
+    } catch (error) {
+      console.error('Error rejecting:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to reject. Please try again.',
+        variant: 'destructive',
+      });
+    } finally {
+      setActionLoading(null);
+    }
   };
 
-  const handleAddBonusDeduction = () => {
+  const handleAddBonusDeduction = async () => {
     if (!selectedEmployee || !newBonusAmount || !newBonusCategory) {
       toast({
         title: 'Validation Error',
@@ -332,33 +396,93 @@ const AdminPayroll = () => {
       return;
     }
 
-    const employee = payrollRecords.find(r => r.farmerId === selectedEmployee);
-    if (!employee) return;
+    // Find employee from employees list or payroll records
+    const employee = employees.find(e => e.id === selectedEmployee) || 
+                     payrollRecords.find(r => r.farmerId === selectedEmployee);
+    if (!employee) {
+      toast({
+        title: 'Error',
+        description: 'Employee not found',
+        variant: 'destructive',
+      });
+      return;
+    }
 
-    const newBD: BonusDeduction = {
-      id: `bd-${Date.now()}`,
-      farmerId: selectedEmployee,
-      farmerName: employee.farmerName,
-      type: newBonusType,
-      category: newBonusCategory,
-      amount: parseFloat(newBonusAmount),
-      description: newBonusDescription,
-      date: new Date().toISOString().split('T')[0],
-      status: 'pending'
-    };
+    setActionLoading('add-bonus');
+    try {
+      const newBDData = {
+        farmer_id: selectedEmployee,
+        farmer_name: 'name' in employee ? employee.name : employee.farmerName,
+        type: newBonusType,
+        category: newBonusCategory,
+        amount: parseFloat(newBonusAmount),
+        description: newBonusDescription,
+        date: new Date().toISOString().split('T')[0],
+      };
 
-    setBonusDeductions(prev => [...prev, newBD]);
-    setShowAddBonus(false);
-    setNewBonusAmount('');
-    setNewBonusCategory('');
-    setNewBonusDescription('');
-    setSelectedEmployee('');
+      const result = await bonusDeductionsApi.create(newBDData);
+
+      const newBD: BonusDeduction = {
+        id: result.id,
+        farmerId: selectedEmployee,
+        farmerName: newBDData.farmer_name,
+        type: newBonusType,
+        category: newBonusCategory,
+        amount: parseFloat(newBonusAmount),
+        description: newBonusDescription,
+        date: newBDData.date,
+        status: 'pending'
+      };
+
+      setBonusDeductions(prev => [...prev, newBD]);
+      setShowAddBonus(false);
+      setNewBonusAmount('');
+      setNewBonusCategory('');
+      setNewBonusDescription('');
+      setSelectedEmployee('');
+
+      toast({
+        title: 'Success',
+        description: `${newBonusType === 'bonus' ? 'Bonus' : 'Deduction'} has been added.`,
+      });
+    } catch (error) {
+      console.error('Error adding bonus/deduction:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to add bonus/deduction. Please try again.',
+        variant: 'destructive',
+      });
+    } finally {
+      setActionLoading(null);
+    }
   };
 
-  const processAllPending = () => {
-    setPayrollRecords(prev => prev.map(record => 
-      record.status === 'pending' ? { ...record, status: 'processing' as const } : record
-    ));
+  const processAllPending = async () => {
+    const pendingRecords = payrollRecords.filter(r => r.status === 'pending');
+    if (pendingRecords.length === 0) return;
+
+    setActionLoading('process-all');
+    try {
+      await Promise.all(
+        pendingRecords.map(record => payrollApi.updateStatus(record.id, 'processing'))
+      );
+      setPayrollRecords(prev => prev.map(record => 
+        record.status === 'pending' ? { ...record, status: 'processing' as const } : record
+      ));
+      toast({
+        title: 'Processing Started',
+        description: `${pendingRecords.length} payroll records are now being processed.`,
+      });
+    } catch (error) {
+      console.error('Error processing all:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to process all pending payments. Please try again.',
+        variant: 'destructive',
+      });
+    } finally {
+      setActionLoading(null);
+    }
   };
 
   const totalBonuses = bonusDeductions.filter(bd => bd.type === 'bonus' && bd.status === 'approved').reduce((sum, bd) => sum + bd.amount, 0);
@@ -510,35 +634,70 @@ const AdminPayroll = () => {
   };
 
   // Close payroll period
-  const handleClosePeriod = (periodId: string) => {
-    setPayPeriods(prev => prev.map(p => 
-      p.id === periodId ? { ...p, status: 'closed' as const } : p
-    ));
+  const handleClosePeriod = async (periodId: string) => {
+    setActionLoading(periodId);
+    try {
+      await payPeriodsApi.update(periodId, { status: 'closed' });
+      setPayPeriods(prev => prev.map(p => 
+        p.id === periodId ? { ...p, status: 'closed' as const } : p
+      ));
 
-    toast({
-      title: 'Period Closed',
-      description: 'Payroll period has been closed successfully.',
-    });
+      toast({
+        title: 'Period Closed',
+        description: 'Payroll period has been closed successfully.',
+      });
+    } catch (error) {
+      console.error('Error closing period:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to close period. Please try again.',
+        variant: 'destructive',
+      });
+    } finally {
+      setActionLoading(null);
+    }
   };
 
   // Create new period
-  const handleCreateNewPeriod = () => {
-    const newPeriod: PayPeriod = {
-      id: `period-${Date.now()}`,
-      name: `${new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' })} - Week ${Math.ceil(new Date().getDate() / 7)}`,
-      startDate: new Date().toISOString().split('T')[0],
-      endDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-      status: 'active',
-      totalPayroll: 0,
-      employeeCount: payrollRecords.length,
-    };
+  const handleCreateNewPeriod = async () => {
+    setActionLoading('create-period');
+    try {
+      const periodName = `${new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' })} - Week ${Math.ceil(new Date().getDate() / 7)}`;
+      const startDate = new Date().toISOString().split('T')[0];
+      const endDate = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
-    setPayPeriods(prev => [newPeriod, ...prev]);
+      const result = await payPeriodsApi.create({
+        name: periodName,
+        start_date: startDate,
+        end_date: endDate,
+      });
 
-    toast({
-      title: 'Period Created',
-      description: `New payroll period "${newPeriod.name}" has been created.`,
-    });
+      const newPeriod: PayPeriod = {
+        id: result.id,
+        name: periodName,
+        startDate: startDate,
+        endDate: endDate,
+        status: 'active',
+        totalPayroll: 0,
+        employeeCount: payrollRecords.length,
+      };
+
+      setPayPeriods(prev => [newPeriod, ...prev]);
+
+      toast({
+        title: 'Period Created',
+        description: `New payroll period "${newPeriod.name}" has been created.`,
+      });
+    } catch (error) {
+      console.error('Error creating period:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to create period. Please try again.',
+        variant: 'destructive',
+      });
+    } finally {
+      setActionLoading(null);
+    }
   };
 
   return (
@@ -549,6 +708,14 @@ const AdminPayroll = () => {
         <DashboardHeader userName={user?.name} />
         
         <main className="flex-1 overflow-auto p-4 md:p-6">
+          {loading ? (
+            <div className="flex items-center justify-center h-full">
+              <div className="text-center">
+                <Loader2 className="h-12 w-12 animate-spin mx-auto mb-4 text-green-600" />
+                <p className="text-gray-600 dark:text-gray-400">Loading payroll data...</p>
+              </div>
+            </div>
+          ) : (
           <div className="max-w-7xl mx-auto space-y-6">
             <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
               <h1 className="text-xl md:text-2xl font-semibold text-gray-900 dark:text-white">Payroll Management</h1>
@@ -556,9 +723,13 @@ const AdminPayroll = () => {
                 <Button 
                   onClick={processAllPending}
                   className="bg-blue-600 hover:bg-blue-700"
-                  disabled={pendingPayments === 0}
+                  disabled={pendingPayments === 0 || actionLoading === 'process-all'}
                 >
-                  <Send className="h-4 w-4 mr-2" />
+                  {actionLoading === 'process-all' ? (
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  ) : (
+                    <Send className="h-4 w-4 mr-2" />
+                  )}
                   Process All Pending
                 </Button>
                 <Button onClick={handleExportCSV} className="bg-green-600 hover:bg-green-700">
@@ -711,8 +882,13 @@ const AdminPayroll = () => {
                                   size="sm" 
                                   onClick={() => handleProcessPayroll(record.id)}
                                   className="bg-blue-600 hover:bg-blue-700"
+                                  disabled={actionLoading === record.id}
                                 >
-                                  <Send className="h-3 w-3 mr-1" />
+                                  {actionLoading === record.id ? (
+                                    <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                                  ) : (
+                                    <Send className="h-3 w-3 mr-1" />
+                                  )}
                                   Process
                                 </Button>
                               )}
@@ -721,8 +897,13 @@ const AdminPayroll = () => {
                                   size="sm" 
                                   onClick={() => handleMarkPaid(record.id)}
                                   className="bg-green-600 hover:bg-green-700"
+                                  disabled={actionLoading === record.id}
                                 >
-                                  <CheckCircle className="h-3 w-3 mr-1" />
+                                  {actionLoading === record.id ? (
+                                    <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                                  ) : (
+                                    <CheckCircle className="h-3 w-3 mr-1" />
+                                  )}
                                   Mark Paid
                                 </Button>
                               )}
@@ -732,7 +913,9 @@ const AdminPayroll = () => {
                                   onClick={() => handleReleaseHold(record.id)}
                                   variant="outline"
                                   className="text-green-600"
+                                  disabled={actionLoading === record.id}
                                 >
+                                  {actionLoading === record.id && <Loader2 className="h-3 w-3 mr-1 animate-spin" />}
                                   Release Hold
                                 </Button>
                               )}
@@ -912,14 +1095,14 @@ const AdminPayroll = () => {
                         <div>
                           <Label>Employee</Label>
                           <select 
-                            className="w-full mt-1 p-2 border rounded-md"
+                            className="w-full mt-1 p-2 border rounded-md dark:bg-gray-800 dark:border-gray-600"
                             value={selectedEmployee}
                             onChange={(e) => setSelectedEmployee(e.target.value)}
                           >
                             <option value="">Select employee...</option>
-                            {payrollRecords.map(record => (
-                              <option key={record.farmerId} value={record.farmerId}>
-                                {record.farmerName}
+                            {employees.map(employee => (
+                              <option key={employee.id} value={employee.id}>
+                                {employee.name}
                               </option>
                             ))}
                           </select>
@@ -953,8 +1136,16 @@ const AdminPayroll = () => {
                           className="mt-1"
                         />
                       </div>
-                      <Button onClick={handleAddBonusDeduction} className="bg-green-600 hover:bg-green-700">
-                        <Plus className="h-4 w-4 mr-2" />
+                      <Button 
+                        onClick={handleAddBonusDeduction} 
+                        className="bg-green-600 hover:bg-green-700"
+                        disabled={actionLoading === 'add-bonus'}
+                      >
+                        {actionLoading === 'add-bonus' ? (
+                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                        ) : (
+                          <Plus className="h-4 w-4 mr-2" />
+                        )}
                         Add {newBonusType === 'bonus' ? 'Bonus' : 'Deduction'}
                       </Button>
                     </CardContent>
@@ -1000,14 +1191,20 @@ const AdminPayroll = () => {
                                   size="sm" 
                                   onClick={() => handleApproveBonusDeduction(bd.id)}
                                   className="bg-green-600 hover:bg-green-700"
+                                  disabled={actionLoading === bd.id}
                                 >
-                                  <CheckCircle className="h-3 w-3" />
+                                  {actionLoading === bd.id ? (
+                                    <Loader2 className="h-3 w-3 animate-spin" />
+                                  ) : (
+                                    <CheckCircle className="h-3 w-3" />
+                                  )}
                                 </Button>
                                 <Button 
                                   size="sm" 
                                   variant="outline"
                                   onClick={() => handleRejectBonusDeduction(bd.id)}
                                   className="text-red-600"
+                                  disabled={actionLoading === bd.id}
                                 >
                                   <AlertTriangle className="h-3 w-3" />
                                 </Button>
@@ -1029,8 +1226,16 @@ const AdminPayroll = () => {
                         <Calendar className="h-5 w-5 mr-2" />
                         Pay Periods
                       </span>
-                      <Button className="bg-green-600 hover:bg-green-700" onClick={handleCreateNewPeriod}>
-                        <Plus className="h-4 w-4 mr-2" />
+                      <Button 
+                        className="bg-green-600 hover:bg-green-700" 
+                        onClick={handleCreateNewPeriod}
+                        disabled={actionLoading === 'create-period'}
+                      >
+                        {actionLoading === 'create-period' ? (
+                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                        ) : (
+                          <Plus className="h-4 w-4 mr-2" />
+                        )}
                         Create New Period
                       </Button>
                     </CardTitle>
@@ -1085,8 +1290,17 @@ const AdminPayroll = () => {
                               Export
                             </Button>
                             {period.status === 'active' && (
-                              <Button size="sm" className="bg-blue-600 hover:bg-blue-700" onClick={() => handleClosePeriod(period.id)}>
-                                <CheckCircle className="h-4 w-4 mr-1" />
+                              <Button 
+                                size="sm" 
+                                className="bg-blue-600 hover:bg-blue-700" 
+                                onClick={() => handleClosePeriod(period.id)}
+                                disabled={actionLoading === period.id}
+                              >
+                                {actionLoading === period.id ? (
+                                  <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                                ) : (
+                                  <CheckCircle className="h-4 w-4 mr-1" />
+                                )}
                                 Close Period
                               </Button>
                             )}
@@ -1257,6 +1471,7 @@ const AdminPayroll = () => {
               </TabsContent>
             </Tabs>
           </div>
+          )}
         </main>
       </div>
 

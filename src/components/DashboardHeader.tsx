@@ -1,21 +1,52 @@
 
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Search, Download, Bell, Plus } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import ThemeToggle from '@/components/ThemeToggle';
+
+const API_BASE_URL = 'http://localhost:3001/api';
 
 interface DashboardHeaderProps {
   userName?: string;
-  alertCount?: number;
   onExport?: () => void;
   onNewReport?: () => void;
 }
 
-const DashboardHeader = ({ userName, alertCount = 0, onExport, onNewReport }: DashboardHeaderProps) => {
+const DashboardHeader = ({ userName, onExport, onNewReport }: DashboardHeaderProps) => {
   const navigate = useNavigate();
+  const location = useLocation();
+  const [alertCount, setAlertCount] = useState(0);
+
+  // Fetch active notification count from PostgreSQL database
+  const fetchActiveNotificationCount = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/notifications/active`);
+      if (response.ok) {
+        const data = await response.json();
+        setAlertCount(data.length);
+      }
+    } catch (err) {
+      console.error('Error fetching notification count:', err);
+    }
+  };
+
+  // Fetch on mount and set up polling interval for real-time updates
+  useEffect(() => {
+    fetchActiveNotificationCount();
+    
+    // Poll every 30 seconds for real-time updates
+    const interval = setInterval(fetchActiveNotificationCount, 30000);
+    
+    return () => clearInterval(interval);
+  }, []);
+
+  // Also refresh when location changes (user navigates)
+  useEffect(() => {
+    fetchActiveNotificationCount();
+  }, [location.pathname]);
 
   const handleNotifications = () => {
     navigate('/notifications');

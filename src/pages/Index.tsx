@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
-import { Bell, Thermometer, Droplets, MapPin, Menu, Filter, Settings, LogOut } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
+import { Bell, Thermometer, Droplets, MapPin, Menu, Filter, Settings, LogOut, RefreshCw, Loader2, Beaker } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -7,7 +7,7 @@ import { Progress } from '@/components/ui/progress';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/contexts/AuthContext';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -27,6 +27,10 @@ import ContainerMap from '@/components/ContainerMap';
 import SensorChart from '@/components/SensorChart';
 import PredictiveAnalytics from '@/components/PredictiveAnalytics';
 import { exportSensorDataToCSV } from '@/lib/exportUtils';
+import { treesApi, TreeData } from '@/services/api';
+import { Skeleton } from '@/components/ui/skeleton';
+
+const API_BASE_URL = 'http://localhost:3001/api';
 
 interface SensorData {
   id: string;
@@ -38,88 +42,147 @@ interface SensorData {
   batteryLevel: number;
   lastUpdate: Date;
   location: { lat: number; lng: number };
+  locationText: string;
   status: 'optimal' | 'warning' | 'critical' | 'harvest';
 }
 
 const Index = () => {
   const { logout, user } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
   const [containers, setContainers] = useState<SensorData[]>([]);
-  const [alertCount, setAlertCount] = useState(3); // Track number of active alerts
+  const [alertCount, setAlertCount] = useState(0);
   const [selectedContainer, setSelectedContainer] = useState<string | null>(null);
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isHarvesting, setIsHarvesting] = useState<string | null>(null);
   const { toast } = useToast();
 
-  // Generate mock sensor data
-  const generateSensorData = (id: string, index: number): SensorData => {
-    const baseTemp = 28 + Math.random() * 8; // 28-36°C
-    const basePh = 5.0 + (Math.random() - 0.5) * 3; // 3.5-6.5 pH range
-    const baseHumidity = 70 + Math.random() * 25; // 70-95%
-    const baseVolume = Math.random() * 10; // 0-10 liters
+  // Fetch active notification count from PostgreSQL database
+  const fetchActiveNotificationCount = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/notifications/active`);
+      if (response.ok) {
+        const data = await response.json();
+        setAlertCount(data.length);
+      }
+    } catch (err) {
+      console.error('Error fetching notification count:', err);
+    }
+  }, []);
+
+  // Fetch notification count on mount and set up polling
+  useEffect(() => {
+    fetchActiveNotificationCount();
     
+    // Poll every 30 seconds for real-time updates
+    const interval = setInterval(fetchActiveNotificationCount, 30000);
+    
+    return () => clearInterval(interval);
+  }, [fetchActiveNotificationCount]);
+
+  // Also refresh when location changes
+  useEffect(() => {
+    fetchActiveNotificationCount();
+  }, [location.pathname, fetchActiveNotificationCount]);
+
+  // Convert database tree to SensorData format
+  const treeToSensorData = (tree: TreeData, index: number): SensorData => {
+    // Parse values - database returns DECIMAL as strings
+    const ph = parseFloat(String(tree.current_ph)) || 0;
+    const temperature = parseFloat(String(tree.current_temperature)) || 0;
+    const volume = parseFloat(String(tree.current_volume)) || 0;
+    
+    // Determine status based on pH levels
     let status: SensorData['status'] = 'optimal';
-    if (basePh <= 4.8 || basePh >= 7.2) status = 'critical';
-    else if (basePh >= 5.0 && basePh <= 5.5) status = 'harvest';
-    else if (basePh < 5.0 || basePh > 6.0) status = 'warning';
+    if (ph === 0) {
+      status = 'optimal'; // No data yet
+    } else if (ph <= 4.8 || ph >= 7.2) {
+      status = 'critical';
+    } else if (ph >= 5.0 && ph <= 5.5) {
+      status = 'harvest';
+    } else if (ph < 5.0 || ph > 6.0) {
+      status = 'warning';
+    }
 
     return {
-      id,
-      name: `Tree ${String.fromCharCode(65 + index)}${(index + 1).toString().padStart(2, '0')}`,
-      ph: Number(basePh.toFixed(2)),
-      temperature: Number(baseTemp.toFixed(1)),
-      volume: Number(baseVolume.toFixed(2)),
-      humidity: Number(baseHumidity.toFixed(1)),
-      batteryLevel: 60 + Math.random() * 40,
-      lastUpdate: new Date(),
+      id: tree.id,
+      name: tree.name,
+      ph: Number(ph.toFixed(2)),
+      temperature: Number(temperature.toFixed(1)),
+      volume: Number(volume.toFixed(2)),
+      humidity: 75, // Default humidity if not available
+      batteryLevel: 85, // Default battery level
+      lastUpdate: tree.last_reading ? new Date(tree.last_reading) : new Date(),
       location: {
-        lat: 14.5995 + (Math.random() - 0.5) * 0.01,
-        lng: 120.9842 + (Math.random() - 0.5) * 0.01
+        lat: 14.5995 + (index * 0.001),
+        lng: 120.9842 + (index * 0.001)
       },
+      locationText: tree.location || 'Not specified',
       status
     };
   };
 
-  // Initialize containers
-  useEffect(() => {
-    const initialContainers = Array.from({ length: 12 }, (_, i) => 
-      generateSensorData(`container-${i + 1}`, i)
-    );
-    setContainers(initialContainers);
-  }, []);
+  // Fetch trees from database
+  const fetchTrees = useCallback(async (showRefreshIndicator = false) => {
+    if (showRefreshIndicator) {
+      setIsRefreshing(true);
+    }
+    
+    try {
+      console.log('Fetching trees from API...');
+      const trees = await treesApi.getAll();
+      console.log('Trees fetched:', trees);
+      
+      if (!trees || trees.length === 0) {
+        console.log('No trees found in database');
+        setContainers([]);
+        setIsLoading(false);
+        setIsRefreshing(false);
+        return;
+      }
+      
+      const sensorData = trees.map((tree, index) => treeToSensorData(tree, index));
+      
+      // Update containers with new data
+      setContainers(sensorData);
+      
+    } catch (error) {
+      console.error('Error fetching trees:', error);
+      // Show error toast
+      if (!showRefreshIndicator) {
+        toast({
+          title: 'Connection Error',
+          description: 'Unable to fetch tree data. Make sure the backend server is running on port 3001.',
+          variant: 'destructive',
+        });
+      }
+    } finally {
+      setIsLoading(false);
+      setIsRefreshing(false);
+    }
+  }, [toast]);
 
-  // Simulate real-time updates
+  // Initialize containers from database
+  useEffect(() => {
+    fetchTrees();
+  }, [fetchTrees]);
+
+  // Poll for real-time updates every 5 seconds
   useEffect(() => {
     const interval = setInterval(() => {
-      setContainers(prev => prev.map(container => {
-        const updated = generateSensorData(container.id, parseInt(container.id.split('-')[1]) - 1);
-        
-        // Check for new harvest opportunities
-        if (updated.status === 'harvest' && container.status !== 'harvest') {
-          toast({
-            title: "Harvest Alert! 🌴",
-            description: `${updated.name} is ready for harvest (pH: ${updated.ph})`,
-            duration: 8000,
-          });
-        }
-        
-        // Check for critical pH levels
-        if (updated.status === 'critical' && container.status !== 'critical') {
-          setAlertCount(prev => prev + 1);
-          toast({
-            title: "Critical Alert! ⚠️",
-            description: `${updated.name} has critical pH levels (${updated.ph})`,
-            variant: "destructive",
-            duration: 10000,
-          });
-        }
-        
-        return { ...updated, name: container.name };
-      }));
-    }, 3000);
+      fetchTrees();
+    }, 5000);
 
     return () => clearInterval(interval);
-  }, [toast]);
+  }, [fetchTrees]);
+
+  // Manual refresh handler
+  const handleRefresh = () => {
+    fetchTrees(true);
+  };
 
   const getStatusColor = (status: SensorData['status']) => {
     switch (status) {
@@ -163,14 +226,54 @@ const Index = () => {
   };
 
   // Container action handlers
-  const handleMarkHarvested = (containerId: string) => {
-    setContainers(prev => prev.map(c => 
-      c.id === containerId ? { ...c, status: 'optimal' as const, volume: 0 } : c
-    ));
-    toast({
-      title: 'Harvest Recorded',
-      description: `Container ${containerId} has been marked as harvested.`,
-    });
+  const handleMarkHarvested = async (containerId: string) => {
+    const container = containers.find(c => c.id === containerId);
+    if (!container) return;
+    
+    // Check if there's volume to harvest
+    if (container.volume <= 0) {
+      toast({
+        title: 'No Volume',
+        description: 'This container has no sap to harvest.',
+        variant: 'destructive',
+      });
+      return;
+    }
+    
+    setIsHarvesting(containerId);
+    try {
+      // Call the harvest API - this will:
+      // 1. Record the harvest in the database
+      // 2. Add the volume to the employee's total_harvest
+      // 3. Reset the tree's volume to 0
+      // 4. Set the tree status to 'optimal'
+      const result = await treesApi.harvestTree(containerId, {
+        farmer_id: user?.id,
+        farmer_name: user?.name,
+      });
+      
+      // Update local state to reflect the change immediately
+      setContainers(prev => prev.map(c => 
+        c.id === containerId ? { ...c, status: 'optimal' as const, volume: 0 } : c
+      ));
+      
+      toast({
+        title: 'Harvest Recorded',
+        description: `Harvested ${result.volume.toFixed(2)}L from ${container.name}. Quality: ${(result.quality * 100).toFixed(0)}%`,
+      });
+      
+      // Refresh data to get updated totals
+      fetchTrees();
+    } catch (error: any) {
+      console.error('Error recording harvest:', error);
+      toast({
+        title: 'Harvest Failed',
+        description: error.message || 'Failed to record harvest. Please try again.',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsHarvesting(null);
+    }
   };
 
   const handleSendMaintenance = (containerId: string) => {
@@ -267,6 +370,17 @@ const Index = () => {
             {/* Back to Admin Dashboard */}
             <Button onClick={handleBackToAdmin} variant="outline" size="sm" className="hidden sm:flex">
               Back to Admin
+            </Button>
+
+            {/* Refresh Button */}
+            <Button 
+              onClick={handleRefresh} 
+              variant="outline" 
+              size="icon"
+              disabled={isRefreshing}
+              title="Refresh data"
+            >
+              <RefreshCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />
             </Button>
 
             {/* Filter Dropdown */}
@@ -403,7 +517,46 @@ const Index = () => {
             </div>
 
             {/* Container Grid - Mobile Optimized */}
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 md:gap-4">
+            {isLoading ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 md:gap-4">
+                {[1, 2, 3, 4].map((i) => (
+                  <Card key={i} className="bg-white/90 dark:bg-gray-800/90 backdrop-blur">
+                    <CardHeader className="pb-2 md:pb-3">
+                      <div className="flex justify-between items-center">
+                        <Skeleton className="h-5 w-24" />
+                        <Skeleton className="h-5 w-20 rounded-full" />
+                      </div>
+                    </CardHeader>
+                    <CardContent className="space-y-3">
+                      <Skeleton className="h-16 w-full" />
+                      <div className="grid grid-cols-2 gap-2">
+                        <Skeleton className="h-10 w-full" />
+                        <Skeleton className="h-10 w-full" />
+                        <Skeleton className="h-10 w-full" />
+                        <Skeleton className="h-10 w-full" />
+                      </div>
+                      <Skeleton className="h-4 w-32 mx-auto" />
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+            ) : containers.length === 0 ? (
+              <Card className="bg-white/90 dark:bg-gray-800/90 backdrop-blur">
+                <CardContent className="p-8 text-center">
+                  <div className="text-6xl mb-4">🌴</div>
+                  <h3 className="text-lg font-semibold text-gray-700 dark:text-gray-300 mb-2">
+                    No Trees Registered
+                  </h3>
+                  <p className="text-gray-500 dark:text-gray-400 mb-4">
+                    Register trees/prototypes in the Employee Management page to start monitoring.
+                  </p>
+                  <Button onClick={() => navigate('/admin/employees')} className="bg-green-600 hover:bg-green-700">
+                    Go to Employee Management
+                  </Button>
+                </CardContent>
+              </Card>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 md:gap-4">
               {filteredContainers.map((container) => (
                 <Card 
                   key={container.id} 
@@ -471,7 +624,7 @@ const Index = () => {
                       </div>
                       
                       <div className="flex items-center space-x-1 md:space-x-2">
-                        <MapPin className="h-3 w-3 md:h-4 md:w-4 text-blue-500 flex-shrink-0" />
+                        <Beaker className="h-3 w-3 md:h-4 md:w-4 text-green-500 flex-shrink-0" />
                         <div className="min-w-0">
                           <div className="font-medium truncate">{container.volume}L</div>
                           <div className="text-xs text-gray-500">Volume</div>
@@ -479,13 +632,18 @@ const Index = () => {
                       </div>
                     </div>
 
-                    <div className="text-xs text-gray-500 dark:text-gray-400 text-center pt-1 md:pt-2 border-t dark:border-gray-600">
-                      {container.lastUpdate.toLocaleTimeString()}
+                    <div className="text-xs text-gray-500 dark:text-gray-400 text-center pt-1 md:pt-2 border-t dark:border-gray-600 space-y-1">
+                      <div className="flex items-center justify-center gap-1">
+                        <MapPin className="h-3 w-3 text-gray-400" />
+                        <span className="truncate">{container.locationText}</span>
+                      </div>
+                      <div>{container.lastUpdate.toLocaleTimeString()}</div>
                     </div>
                   </CardContent>
                 </Card>
               ))}
-            </div>
+              </div>
+            )}
 
             {/* Detailed View - Mobile Responsive */}
             {selectedContainer && (

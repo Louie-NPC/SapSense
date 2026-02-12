@@ -15,6 +15,7 @@ const bonusDeductionsRoutes = require('./routes/bonusDeductions');
 const notificationsRoutes = require('./routes/notifications');
 const treesRoutes = require('./routes/trees');
 const settingsRoutes = require('./routes/settings');
+const harvestRoutes = require('./routes/harvest');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -44,6 +45,7 @@ app.use('/api/bonus-deductions', bonusDeductionsRoutes);
 app.use('/api/notifications', notificationsRoutes);
 app.use('/api/trees', treesRoutes);
 app.use('/api/settings', settingsRoutes);
+app.use('/api/harvest', harvestRoutes);
 
 // 404 handler
 app.use((req, res) => {

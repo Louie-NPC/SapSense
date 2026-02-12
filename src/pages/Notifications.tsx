@@ -1,11 +1,12 @@
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Bell, Clock, CheckCircle, AlertTriangle, Info, X, ArrowLeft } from 'lucide-react';
+import { Bell, Clock, CheckCircle, AlertTriangle, Info, X, ArrowLeft, RefreshCw, Loader2 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Skeleton } from '@/components/ui/skeleton';
 import {
   Dialog,
   DialogContent,
@@ -15,6 +16,9 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { useAuth } from '@/contexts/AuthContext';
+import { useToast } from '@/hooks/use-toast';
+
+const API_BASE_URL = 'http://localhost:3001/api';
 
 interface NotificationAlert {
   id: string;
@@ -29,63 +33,92 @@ interface NotificationAlert {
   priority: 'high' | 'medium' | 'low';
 }
 
+interface NotificationFromDB {
+  id: string;
+  type: 'critical' | 'warning' | 'info' | 'success';
+  title: string;
+  message: string;
+  timestamp: string;
+  farmer_id: string | null;
+  farmer_name: string | null;
+  tree_id: string | null;
+  status: 'active' | 'acknowledged' | 'resolved';
+  priority: 'high' | 'medium' | 'low';
+  created_at: string;
+  updated_at: string;
+}
+
 const Notifications = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
+  const { toast } = useToast();
   
   // Detail dialog state
   const [detailDialog, setDetailDialog] = useState<NotificationAlert | null>(null);
   
-  const [notifications, setNotifications] = useState<NotificationAlert[]>([
-    {
-      id: 'notif-1',
-      type: 'critical',
-      title: 'Critical pH Level Alert',
-      message: 'Tree container-5 pH level has dropped to 4.2 - immediate attention required',
-      timestamp: new Date('2024-01-15T10:30:00'),
-      farmerId: 'farmer-2',
-      farmerName: 'Maria Santos',
-      treeId: 'container-5',
-      status: 'active',
-      priority: 'high'
-    },
-    {
-      id: 'notif-2',
-      type: 'warning',
-      title: 'Quality Threshold Warning',
-      message: 'Tree container-8 sap quality approaching minimum threshold (3.8/5.0)',
-      timestamp: new Date('2024-01-15T09:15:00'),
-      farmerId: 'farmer-3',
-      farmerName: 'Pedro Garcia',
-      treeId: 'container-8',
-      status: 'acknowledged',
-      priority: 'medium'
-    },
-    {
-      id: 'notif-3',
-      type: 'info',
-      title: 'Harvest Reminder',
-      message: 'Tree container-1 is ready for harvest - optimal pH level achieved (5.6)',
-      timestamp: new Date('2024-01-15T08:45:00'),
-      farmerId: 'farmer-1',
-      farmerName: 'Juan Dela Cruz',
-      treeId: 'container-1',
-      status: 'active',
-      priority: 'low'
-    },
-    {
-      id: 'notif-4',
-      type: 'success',
-      title: 'Quality Improvement',
-      message: 'Tree container-3 pH levels have stabilized after treatment',
-      timestamp: new Date('2024-01-15T07:20:00'),
-      farmerId: 'farmer-1',
-      farmerName: 'Juan Dela Cruz',
-      treeId: 'container-3',
-      status: 'resolved',
-      priority: 'low'
+  // Loading and error states
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  
+  const [notifications, setNotifications] = useState<NotificationAlert[]>([]);
+
+  // Transform database notification to frontend format
+  const transformNotification = (dbNotif: NotificationFromDB): NotificationAlert => ({
+    id: dbNotif.id,
+    type: dbNotif.type,
+    title: dbNotif.title,
+    message: dbNotif.message || '',
+    timestamp: new Date(dbNotif.timestamp),
+    farmerId: dbNotif.farmer_id || undefined,
+    farmerName: dbNotif.farmer_name || undefined,
+    treeId: dbNotif.tree_id || undefined,
+    status: dbNotif.status,
+    priority: dbNotif.priority
+  });
+
+  // Fetch notifications from PostgreSQL database
+  const fetchNotifications = async (showRefreshing = false) => {
+    if (showRefreshing) {
+      setIsRefreshing(true);
+    } else {
+      setLoading(true);
     }
-  ]);
+    setError(null);
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/notifications`);
+      
+      if (!response.ok) {
+        throw new Error('Failed to fetch notifications');
+      }
+
+      const data: NotificationFromDB[] = await response.json();
+      const transformedNotifications = data.map(transformNotification);
+      setNotifications(transformedNotifications);
+    } catch (err) {
+      console.error('Error fetching notifications:', err);
+      setError('Failed to load notifications. Please ensure the server is running.');
+      toast({
+        title: 'Error',
+        description: 'Failed to load notifications from server.',
+        variant: 'destructive'
+      });
+    } finally {
+      setLoading(false);
+      setIsRefreshing(false);
+    }
+  };
+
+  // Fetch notifications on component mount
+  useEffect(() => {
+    fetchNotifications();
+  }, []);
+
+  // Refresh notifications
+  const handleRefresh = () => {
+    fetchNotifications(true);
+  };
 
   const getNotificationIcon = (type: string) => {
     switch (type) {
@@ -133,16 +166,64 @@ const Notifications = () => {
     }
   };
 
-  const handleAcknowledge = (id: string) => {
-    setNotifications(prev => 
-      prev.map(n => n.id === id ? { ...n, status: 'acknowledged' } : n)
-    );
+  const handleAcknowledge = async (id: string) => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/notifications/${id}/status`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'acknowledged' })
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to acknowledge notification');
+      }
+
+      setNotifications(prev => 
+        prev.map(n => n.id === id ? { ...n, status: 'acknowledged' } : n)
+      );
+
+      toast({
+        title: 'Alert Acknowledged',
+        description: 'The alert has been marked as acknowledged.',
+      });
+    } catch (err) {
+      console.error('Error acknowledging notification:', err);
+      toast({
+        title: 'Error',
+        description: 'Failed to acknowledge notification.',
+        variant: 'destructive'
+      });
+    }
   };
 
-  const handleResolve = (id: string) => {
-    setNotifications(prev => 
-      prev.map(n => n.id === id ? { ...n, status: 'resolved' } : n)
-    );
+  const handleResolve = async (id: string) => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/notifications/${id}/status`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'resolved' })
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to resolve notification');
+      }
+
+      setNotifications(prev => 
+        prev.map(n => n.id === id ? { ...n, status: 'resolved' } : n)
+      );
+
+      toast({
+        title: 'Alert Resolved',
+        description: 'The alert has been marked as resolved.',
+      });
+    } catch (err) {
+      console.error('Error resolving notification:', err);
+      toast({
+        title: 'Error',
+        description: 'Failed to resolve notification.',
+        variant: 'destructive'
+      });
+    }
   };
 
   const handleDismiss = (id: string) => {
@@ -175,13 +256,62 @@ const Notifications = () => {
               <p className="text-sm text-gray-600 dark:text-gray-400">Manage system notifications and alerts</p>
             </div>
           </div>
-          <div className="text-sm text-gray-600 dark:text-gray-400">
-            Welcome, {user?.name}
+          <div className="flex items-center space-x-4">
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={handleRefresh}
+              disabled={isRefreshing}
+              title="Refresh notifications"
+            >
+              <RefreshCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+            </Button>
+            <div className="text-sm text-gray-600 dark:text-gray-400">
+              Welcome, {user?.name}
+            </div>
           </div>
         </div>
       </header>
 
       <main className="p-4 md:p-6 max-w-6xl mx-auto space-y-6">
+        {/* Error State */}
+        {error && (
+          <Alert variant="destructive">
+            <AlertTriangle className="h-4 w-4" />
+            <AlertTitle>Error</AlertTitle>
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
+
+        {/* Loading State */}
+        {loading ? (
+          <>
+            {/* Summary Cards Skeleton */}
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+              {[1, 2, 3, 4].map((i) => (
+                <Card key={i}>
+                  <CardContent className="p-4">
+                    <Skeleton className="h-4 w-24 mb-2" />
+                    <Skeleton className="h-8 w-12 mb-1" />
+                    <Skeleton className="h-3 w-20" />
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+            {/* Active Alerts Skeleton */}
+            <Card>
+              <CardHeader>
+                <Skeleton className="h-6 w-40" />
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {[1, 2].map((i) => (
+                  <Skeleton key={i} className="h-32 w-full" />
+                ))}
+              </CardContent>
+            </Card>
+          </>
+        ) : (
+          <>
         {/* Summary Cards */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
           <Card>
@@ -346,6 +476,8 @@ const Notifications = () => {
             </div>
           </CardContent>
         </Card>
+        </>
+        )}
       </main>
 
       {/* Notification Detail Dialog */}

@@ -1,5 +1,5 @@
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { 
   Home,
@@ -17,6 +17,8 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { useAuth } from '@/contexts/AuthContext';
 
+const API_BASE_URL = 'http://localhost:3001/api';
+
 interface SidebarItem {
   icon: React.ElementType;
   label: string;
@@ -29,7 +31,35 @@ const AdminSidebar = () => {
   const location = useLocation();
   const { logout } = useAuth();
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-  const alertCount = 3; // This should come from a context or state management
+  const [alertCount, setAlertCount] = useState(0);
+
+  // Fetch active notification count from PostgreSQL database
+  const fetchActiveNotificationCount = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/notifications/active`);
+      if (response.ok) {
+        const data = await response.json();
+        setAlertCount(data.length);
+      }
+    } catch (err) {
+      console.error('Error fetching notification count:', err);
+    }
+  };
+
+  // Fetch on mount and set up polling interval for real-time updates
+  useEffect(() => {
+    fetchActiveNotificationCount();
+    
+    // Poll every 30 seconds for real-time updates
+    const interval = setInterval(fetchActiveNotificationCount, 30000);
+    
+    return () => clearInterval(interval);
+  }, []);
+
+  // Also refresh when location changes (user navigates)
+  useEffect(() => {
+    fetchActiveNotificationCount();
+  }, [location.pathname]);
 
   const handleLogout = () => {
     logout();

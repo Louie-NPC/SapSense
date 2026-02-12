@@ -1,10 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
-import { LogOut } from 'lucide-react';
+import { LogOut, RefreshCw, Loader2, Beaker, Award } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useToast } from '@/hooks/use-toast';
 import { exportSensorDataToCSV } from '@/lib/exportUtils';
+import { treesApi, TreeData, harvestApi } from '@/services/api';
 
 // Import the same components and interfaces from Index
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -33,6 +34,7 @@ interface SensorData {
   batteryLevel: number;
   lastUpdate: Date;
   location: { lat: number; lng: number };
+  locationText: string;
   status: 'optimal' | 'warning' | 'critical' | 'harvest';
 }
 
@@ -44,93 +46,138 @@ const FarmerDashboard = () => {
   const [alerts, setAlerts] = useState<Array<{id: string, message: string, type: 'info' | 'warning' | 'critical', timestamp: Date}>>([]);
   const [selectedContainer, setSelectedContainer] = useState<string | null>(null);
   const [filterStatus, setFilterStatus] = useState<string>('all');
+  const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [farmerStats, setFarmerStats] = useState<{
+    total_volume: number;
+    month_volume: number;
+    week_volume: number;
+    today_volume: number;
+    avg_quality: number;
+    total_records: number;
+  } | null>(null);
 
-  // Generate mock sensor data (same function as in Index)
-  const generateSensorData = (id: string, index: number): SensorData => {
-    const baseTemp = 28 + Math.random() * 8;
-    const basePh = 5.0 + (Math.random() - 0.5) * 3;
-    const baseHumidity = 70 + Math.random() * 25;
-    const baseVolume = Math.random() * 10;
+  const [isHarvesting, setIsHarvesting] = useState<string | null>(null);
+
+  // Convert database tree to SensorData format
+  const treeToSensorData = (tree: TreeData, index: number): SensorData => {
+    // Parse values - database returns DECIMAL as strings
+    const ph = parseFloat(String(tree.current_ph)) || 0;
+    const temperature = parseFloat(String(tree.current_temperature)) || 0;
+    const volume = parseFloat(String(tree.current_volume)) || 0;
     
+    // Determine status based on pH levels
     let status: SensorData['status'] = 'optimal';
-    if (basePh <= 4.8 || basePh >= 7.2) status = 'critical';
-    else if (basePh >= 5.0 && basePh <= 5.5) status = 'harvest';
-    else if (basePh < 5.0 || basePh > 6.0) status = 'warning';
+    if (ph === 0) {
+      status = 'optimal'; // No data yet
+    } else if (ph <= 4.8 || ph >= 7.2) {
+      status = 'critical';
+    } else if (ph >= 5.0 && ph <= 5.5) {
+      status = 'harvest';
+    } else if (ph < 5.0 || ph > 6.0) {
+      status = 'warning';
+    }
 
     return {
-      id,
-      name: `Tree ${String.fromCharCode(65 + index)}${(index + 1).toString().padStart(2, '0')}`,
-      ph: Number(basePh.toFixed(2)),
-      temperature: Number(baseTemp.toFixed(1)),
-      volume: Number(baseVolume.toFixed(2)),
-      humidity: Number(baseHumidity.toFixed(1)),
-      batteryLevel: 60 + Math.random() * 40,
-      lastUpdate: new Date(),
+      id: tree.id,
+      name: tree.name,
+      ph: Number(ph.toFixed(2)),
+      temperature: Number(temperature.toFixed(1)),
+      volume: Number(volume.toFixed(2)),
+      humidity: 75, // Default humidity if not available
+      batteryLevel: 85, // Default battery level
+      lastUpdate: tree.last_reading ? new Date(tree.last_reading) : new Date(),
       location: {
-        lat: 14.5995 + (Math.random() - 0.5) * 0.01,
-        lng: 120.9842 + (Math.random() - 0.5) * 0.01
+        lat: 14.5995 + (index * 0.001),
+        lng: 120.9842 + (index * 0.001)
       },
+      locationText: tree.location || 'Not specified',
       status
     };
   };
 
-  // Initialize containers - only assigned trees
-  useEffect(() => {
-    if (user?.assignedTrees) {
-      const farmerContainers = user.assignedTrees.map((treeId, index) => 
-        generateSensorData(treeId, parseInt(treeId.split('-')[1]) - 1)
-      );
-      setContainers(farmerContainers);
+  // Fetch trees assigned to this farmer from database
+  const fetchTrees = useCallback(async (showRefreshIndicator = false) => {
+    if (showRefreshIndicator) {
+      setIsRefreshing(true);
     }
-  }, [user]);
+    
+    try {
+      console.log('Fetching farmer trees from API...');
+      
+      // Fetch trees assigned to this farmer
+      let trees: TreeData[] = [];
+      
+      if (user?.id) {
+        // Try to get trees by farmer ID first
+        trees = await treesApi.getByFarmer(user.id);
+        
+        // Also fetch farmer's harvest stats
+        try {
+          const stats = await harvestApi.getFarmerStats(user.id);
+          setFarmerStats(stats);
+        } catch (statsErr) {
+          console.error('Error fetching farmer stats:', statsErr);
+        }
+      }
+      
+      // If no trees assigned, fallback to checking assignedTrees from user object
+      if (trees.length === 0 && user?.assignedTrees && user.assignedTrees.length > 0) {
+        // Fetch all trees and filter by assigned IDs
+        const allTrees = await treesApi.getAll();
+        trees = allTrees.filter(tree => user.assignedTrees?.includes(tree.id));
+      }
+      
+      console.log('Farmer trees fetched:', trees);
+      
+      if (!trees || trees.length === 0) {
+        console.log('No trees assigned to this farmer');
+        setContainers([]);
+        setIsLoading(false);
+        setIsRefreshing(false);
+        return;
+      }
+      
+      const sensorData = trees.map((tree, index) => treeToSensorData(tree, index));
+      
+      // Update containers with new data
+      setContainers(sensorData);
+      
+    } catch (error) {
+      console.error('Error fetching farmer trees:', error);
+      if (!showRefreshIndicator) {
+        toast({
+          title: 'Connection Error',
+          description: 'Unable to fetch tree data. Make sure the backend server is running.',
+          variant: 'destructive',
+        });
+      }
+    } finally {
+      setIsLoading(false);
+      setIsRefreshing(false);
+    }
+  }, [user, toast]);
 
-  // Simulate real-time updates
+  // Initialize containers from database
+  useEffect(() => {
+    if (user) {
+      fetchTrees();
+    }
+  }, [user, fetchTrees]);
+
+  // Poll for real-time updates every 5 seconds
   useEffect(() => {
     const interval = setInterval(() => {
-      setContainers(prev => prev.map(container => {
-        const updated = generateSensorData(container.id, parseInt(container.id.split('-')[1]) - 1);
-        
-        // Check for new harvest opportunities
-        if (updated.status === 'harvest' && container.status !== 'harvest') {
-          const alertMessage = `🥥 Harvest ready! ${updated.name} - pH at ${updated.ph} (Optimal range)`;
-          setAlerts(prev => [...prev, {
-            id: `alert-${Date.now()}`,
-            message: alertMessage,
-            type: 'info',
-            timestamp: new Date()
-          }]);
-          
-          toast({
-            title: "Harvest Alert! 🌴",
-            description: `${updated.name} is ready for harvest (pH: ${updated.ph})`,
-            duration: 8000,
-          });
-        }
-        
-        // Check for critical pH levels
-        if (updated.status === 'critical' && container.status !== 'critical') {
-          const alertMessage = `⚠️ Critical pH alert! ${updated.name} - pH at ${updated.ph}`;
-          setAlerts(prev => [...prev, {
-            id: `alert-${Date.now()}`,
-            message: alertMessage,
-            type: 'critical',
-            timestamp: new Date()
-          }]);
-          
-          toast({
-            title: "Critical Alert! ⚠️",
-            description: `${updated.name} has critical pH levels (${updated.ph})`,
-            variant: "destructive",
-            duration: 10000,
-          });
-        }
-        
-        return { ...updated, name: container.name };
-      }));
-    }, 3000);
+      fetchTrees();
+    }, 5000);
 
     return () => clearInterval(interval);
-  }, [toast]);
+  }, [fetchTrees]);
+
+  // Manual refresh handler
+  const handleRefresh = () => {
+    fetchTrees(true);
+  };
 
   const handleLogout = () => {
     logout();
@@ -138,14 +185,54 @@ const FarmerDashboard = () => {
   };
 
   // Container action handlers
-  const handleMarkHarvested = (containerId: string) => {
-    setContainers(prev => prev.map(c => 
-      c.id === containerId ? { ...c, status: 'optimal' as const, volume: 0 } : c
-    ));
-    toast({
-      title: 'Harvest Recorded',
-      description: `Container ${containerId} has been marked as harvested.`,
-    });
+  const handleMarkHarvested = async (containerId: string) => {
+    const container = containers.find(c => c.id === containerId);
+    if (!container) return;
+    
+    // Check if there's volume to harvest
+    if (container.volume <= 0) {
+      toast({
+        title: 'No Volume',
+        description: 'This container has no sap to harvest.',
+        variant: 'destructive',
+      });
+      return;
+    }
+    
+    setIsHarvesting(containerId);
+    try {
+      // Call the harvest API - this will:
+      // 1. Record the harvest in the database
+      // 2. Add the volume to the employee's total_harvest
+      // 3. Reset the tree's volume to 0
+      // 4. Set the tree status to 'optimal'
+      const result = await treesApi.harvestTree(containerId, {
+        farmer_id: user?.id,
+        farmer_name: user?.name,
+      });
+      
+      // Update local state to reflect the change immediately
+      setContainers(prev => prev.map(c => 
+        c.id === containerId ? { ...c, status: 'optimal' as const, volume: 0 } : c
+      ));
+      
+      toast({
+        title: 'Harvest Recorded',
+        description: `Harvested ${result.volume.toFixed(2)}L from ${container.name}. Quality: ${(result.quality * 100).toFixed(0)}%`,
+      });
+      
+      // Refresh data to get updated totals
+      fetchTrees();
+    } catch (error: any) {
+      console.error('Error recording harvest:', error);
+      toast({
+        title: 'Harvest Failed',
+        description: error.message || 'Failed to record harvest. Please try again.',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsHarvesting(null);
+    }
   };
 
   const handleSendMaintenance = (containerId: string) => {
@@ -263,9 +350,9 @@ const FarmerDashboard = () => {
 
           <Card className="bg-white/80 dark:bg-gray-800/80 backdrop-blur">
             <CardContent className="p-3 md:p-4">
-              <div className="text-xs md:text-sm font-medium text-green-700 dark:text-green-400 mb-1">Total Volume</div>
-              <div className="text-lg md:text-2xl font-bold text-green-800 dark:text-green-300">{totalVolume.toFixed(1)}L</div>
-              <p className="text-xs text-green-600 dark:text-green-500">Current sap</p>
+              <div className="text-xs md:text-sm font-medium text-blue-700 dark:text-blue-400 mb-1">Current Volume</div>
+              <div className="text-lg md:text-2xl font-bold text-blue-800 dark:text-blue-300">{totalVolume.toFixed(1)}L</div>
+              <p className="text-xs text-blue-600 dark:text-blue-500">Pending harvest</p>
             </CardContent>
           </Card>
 
@@ -285,6 +372,50 @@ const FarmerDashboard = () => {
             </CardContent>
           </Card>
         </div>
+
+        {/* My Harvest Performance */}
+        {farmerStats && (
+          <Card className="bg-gradient-to-r from-green-50 to-emerald-50 dark:from-green-900/30 dark:to-emerald-900/30 border-green-200 dark:border-green-800">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-lg font-semibold text-green-800 dark:text-green-300 flex items-center gap-2">
+                <Award className="h-5 w-5" />
+                My Harvest Performance
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div className="text-center p-3 bg-white/50 dark:bg-gray-800/50 rounded-lg">
+                  <div className="text-xl md:text-2xl font-bold text-green-600 dark:text-green-400">
+                    {farmerStats.month_volume.toFixed(1)}L
+                  </div>
+                  <div className="text-xs text-gray-600 dark:text-gray-400">This Month</div>
+                </div>
+                <div className="text-center p-3 bg-white/50 dark:bg-gray-800/50 rounded-lg">
+                  <div className="text-xl md:text-2xl font-bold text-blue-600 dark:text-blue-400">
+                    {farmerStats.week_volume.toFixed(1)}L
+                  </div>
+                  <div className="text-xs text-gray-600 dark:text-gray-400">This Week</div>
+                </div>
+                <div className="text-center p-3 bg-white/50 dark:bg-gray-800/50 rounded-lg">
+                  <div className="text-xl md:text-2xl font-bold text-orange-600 dark:text-orange-400">
+                    {farmerStats.today_volume.toFixed(1)}L
+                  </div>
+                  <div className="text-xs text-gray-600 dark:text-gray-400">Today</div>
+                </div>
+                <div className="text-center p-3 bg-white/50 dark:bg-gray-800/50 rounded-lg">
+                  <div className="text-xl md:text-2xl font-bold text-purple-600 dark:text-purple-400">
+                    {(farmerStats.avg_quality * 5).toFixed(1)}/5
+                  </div>
+                  <div className="text-xs text-gray-600 dark:text-gray-400">Quality Rating</div>
+                </div>
+              </div>
+              <div className="mt-3 pt-3 border-t border-green-200 dark:border-green-700 flex justify-between text-sm text-gray-600 dark:text-gray-400">
+                <span>Total All Time: <strong className="text-green-600 dark:text-green-400">{farmerStats.total_volume.toFixed(1)}L</strong></span>
+                <span>Total Harvests: <strong className="text-green-600 dark:text-green-400">{farmerStats.total_records}</strong></span>
+              </div>
+            </CardContent>
+          </Card>
+        )}
 
         {/* Alert Panel */}
         <AlertPanel alerts={alerts} onDismiss={(id) => setAlerts(prev => prev.filter(a => a.id !== id))} />
@@ -310,7 +441,25 @@ const FarmerDashboard = () => {
         </div>
 
         {/* Container Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 md:gap-4">
+        {isLoading ? (
+          <div className="flex items-center justify-center p-8">
+            <Loader2 className="h-8 w-8 animate-spin text-green-600" />
+            <span className="ml-2 text-gray-600">Loading your trees...</span>
+          </div>
+        ) : containers.length === 0 ? (
+          <Card className="bg-white/90 dark:bg-gray-800/90 backdrop-blur">
+            <CardContent className="p-8 text-center">
+              <div className="text-6xl mb-4">🌴</div>
+              <h3 className="text-lg font-semibold text-gray-700 dark:text-gray-300 mb-2">
+                No Trees Assigned
+              </h3>
+              <p className="text-gray-500 dark:text-gray-400">
+                You don't have any trees assigned to you yet. Contact your administrator to get trees assigned.
+              </p>
+            </CardContent>
+          </Card>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 md:gap-4">
           {filteredContainers.map((container) => (
             <Card 
               key={container.id} 
@@ -380,7 +529,7 @@ const FarmerDashboard = () => {
                   </div>
                   
                   <div className="flex items-center space-x-1 md:space-x-2">
-                    <MapPin className="h-3 w-3 md:h-4 md:w-4 text-blue-500 flex-shrink-0" />
+                    <Beaker className="h-3 w-3 md:h-4 md:w-4 text-green-500 flex-shrink-0" />
                     <div className="min-w-0">
                       <div className="font-medium truncate">{container.volume}L</div>
                       <div className="text-xs text-gray-500">Volume</div>
@@ -388,13 +537,18 @@ const FarmerDashboard = () => {
                   </div>
                 </div>
 
-                <div className="text-xs text-gray-500 dark:text-gray-400 text-center pt-1 md:pt-2 border-t dark:border-gray-600">
-                  {container.lastUpdate.toLocaleTimeString()}
+                <div className="text-xs text-gray-500 dark:text-gray-400 text-center pt-1 md:pt-2 border-t dark:border-gray-600 space-y-1">
+                  <div className="flex items-center justify-center gap-1">
+                    <MapPin className="h-3 w-3 text-gray-400" />
+                    <span className="truncate">{container.locationText}</span>
+                  </div>
+                  <div>{container.lastUpdate.toLocaleTimeString()}</div>
                 </div>
               </CardContent>
             </Card>
           ))}
-        </div>
+          </div>
+        )}
 
         {/* Detailed View */}
         {selectedContainer && (

@@ -159,7 +159,7 @@ const createTables = async () => {
         current_ph DECIMAL(4,2),
         current_volume DECIMAL(10,2),
         current_temperature DECIMAL(5,2),
-        status VARCHAR(20) DEFAULT 'healthy' CHECK (status IN ('healthy', 'warning', 'critical')),
+        status VARCHAR(20) DEFAULT 'healthy' CHECK (status IN ('healthy', 'warning', 'critical', 'optimal', 'harvest')),
         last_reading TIMESTAMP,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )

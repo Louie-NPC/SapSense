@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import AdminSidebar from '@/components/AdminSidebar';
 import DashboardHeader from '@/components/DashboardHeader';
 import { useAuth } from '@/contexts/AuthContext';
@@ -8,6 +8,7 @@ import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Progress } from '@/components/ui/progress';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Skeleton } from '@/components/ui/skeleton';
 import {
   Dialog,
   DialogContent,
@@ -31,10 +32,13 @@ import {
   Clock,
   XCircle,
   Info,
-  RefreshCw
+  RefreshCw,
+  Loader2
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { exportToPDF, exportDisputesToPDF, exportQualityReportsToPDF } from '@/lib/exportUtils';
+
+const API_BASE_URL = 'http://localhost:3001/api';
 
 interface DisputeRecord {
   id: string;
@@ -74,12 +78,32 @@ interface NotificationAlert {
   priority: 'high' | 'medium' | 'low';
 }
 
+interface NotificationFromDB {
+  id: string;
+  type: 'critical' | 'warning' | 'info' | 'success';
+  title: string;
+  message: string;
+  timestamp: string;
+  farmer_id: string | null;
+  farmer_name: string | null;
+  tree_id: string | null;
+  status: 'active' | 'acknowledged' | 'resolved';
+  priority: 'high' | 'medium' | 'low';
+  created_at: string;
+  updated_at: string;
+}
+
 const AdminReports = () => {
   const { user } = useAuth();
   const { toast } = useToast();
   
   // Dialog state
   const [alertDetailDialog, setAlertDetailDialog] = useState<NotificationAlert | null>(null);
+  
+  // Loading and error states
+  const [notificationsLoading, setNotificationsLoading] = useState(true);
+  const [notificationsError, setNotificationsError] = useState<string | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   
   const [disputes, setDisputes] = useState<DisputeRecord[]>([
     {
@@ -156,68 +180,64 @@ const AdminReports = () => {
     }
   ]);
 
-  const [notifications, setNotifications] = useState<NotificationAlert[]>([
-    {
-      id: 'notif-1',
-      type: 'critical',
-      title: 'Critical pH Level Alert',
-      message: 'Tree container-5 pH level has dropped to 4.2 - immediate attention required',
-      timestamp: new Date('2024-01-15T10:30:00'),
-      farmerId: 'farmer-2',
-      farmerName: 'Maria Santos',
-      treeId: 'container-5',
-      status: 'active',
-      priority: 'high'
-    },
-    {
-      id: 'notif-2',
-      type: 'warning',
-      title: 'Quality Threshold Warning',
-      message: 'Tree container-8 sap quality approaching minimum threshold (3.8/5.0)',
-      timestamp: new Date('2024-01-15T09:15:00'),
-      farmerId: 'farmer-3',
-      farmerName: 'Pedro Garcia',
-      treeId: 'container-8',
-      status: 'acknowledged',
-      priority: 'medium'
-    },
-    {
-      id: 'notif-3',
-      type: 'info',
-      title: 'Harvest Reminder',
-      message: 'Tree container-1 is ready for harvest - optimal pH level achieved (5.6)',
-      timestamp: new Date('2024-01-15T08:45:00'),
-      farmerId: 'farmer-1',
-      farmerName: 'Juan Dela Cruz',
-      treeId: 'container-1',
-      status: 'active',
-      priority: 'low'
-    },
-    {
-      id: 'notif-4',
-      type: 'success',
-      title: 'Quality Improvement',
-      message: 'Tree container-3 pH levels have stabilized after treatment',
-      timestamp: new Date('2024-01-15T07:20:00'),
-      farmerId: 'farmer-1',
-      farmerName: 'Juan Dela Cruz',
-      treeId: 'container-3',
-      status: 'resolved',
-      priority: 'low'
-    },
-    {
-      id: 'notif-5',
-      type: 'warning',
-      title: 'Maintenance Required',
-      message: 'Sensor for container-7 showing irregular readings - maintenance check needed',
-      timestamp: new Date('2024-01-14T16:30:00'),
-      farmerId: 'farmer-3',
-      farmerName: 'Pedro Garcia',
-      treeId: 'container-7',
-      status: 'acknowledged',
-      priority: 'medium'
+  const [notifications, setNotifications] = useState<NotificationAlert[]>([]);
+
+  // Transform database notification to frontend format
+  const transformNotification = (dbNotif: NotificationFromDB): NotificationAlert => ({
+    id: dbNotif.id,
+    type: dbNotif.type,
+    title: dbNotif.title,
+    message: dbNotif.message || '',
+    timestamp: new Date(dbNotif.timestamp),
+    farmerId: dbNotif.farmer_id || undefined,
+    farmerName: dbNotif.farmer_name || undefined,
+    treeId: dbNotif.tree_id || undefined,
+    status: dbNotif.status,
+    priority: dbNotif.priority
+  });
+
+  // Fetch notifications from PostgreSQL database
+  const fetchNotifications = async (showRefreshing = false) => {
+    if (showRefreshing) {
+      setIsRefreshing(true);
+    } else {
+      setNotificationsLoading(true);
     }
-  ]);
+    setNotificationsError(null);
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/notifications`);
+      
+      if (!response.ok) {
+        throw new Error('Failed to fetch notifications');
+      }
+
+      const data: NotificationFromDB[] = await response.json();
+      const transformedNotifications = data.map(transformNotification);
+      setNotifications(transformedNotifications);
+    } catch (err) {
+      console.error('Error fetching notifications:', err);
+      setNotificationsError('Failed to load notifications. Please ensure the server is running.');
+      toast({
+        title: 'Error',
+        description: 'Failed to load notifications from server.',
+        variant: 'destructive'
+      });
+    } finally {
+      setNotificationsLoading(false);
+      setIsRefreshing(false);
+    }
+  };
+
+  // Fetch notifications on component mount
+  useEffect(() => {
+    fetchNotifications();
+  }, []);
+
+  // Refresh notifications
+  const handleRefreshNotifications = () => {
+    fetchNotifications(true);
+  };
 
   const pendingDisputes = disputes.filter(d => d.status === 'pending').length;
   const totalDisputes = disputes.length;
@@ -312,14 +332,33 @@ const AdminReports = () => {
   };
 
   // Acknowledge alert handler
-  const handleAcknowledgeAlert = (id: string) => {
-    setNotifications(prev => 
-      prev.map(n => n.id === id ? { ...n, status: 'acknowledged' as const } : n)
-    );
-    toast({
-      title: 'Alert Acknowledged',
-      description: 'The alert has been marked as acknowledged.',
-    });
+  const handleAcknowledgeAlert = async (id: string) => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/notifications/${id}/status`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'acknowledged' })
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to acknowledge notification');
+      }
+
+      setNotifications(prev => 
+        prev.map(n => n.id === id ? { ...n, status: 'acknowledged' as const } : n)
+      );
+      toast({
+        title: 'Alert Acknowledged',
+        description: 'The alert has been marked as acknowledged.',
+      });
+    } catch (err) {
+      console.error('Error acknowledging notification:', err);
+      toast({
+        title: 'Error',
+        description: 'Failed to acknowledge notification.',
+        variant: 'destructive'
+      });
+    }
   };
 
   // View alert details handler
@@ -328,14 +367,33 @@ const AdminReports = () => {
   };
 
   // Mark resolved handler
-  const handleMarkResolved = (id: string) => {
-    setNotifications(prev => 
-      prev.map(n => n.id === id ? { ...n, status: 'resolved' as const } : n)
-    );
-    toast({
-      title: 'Alert Resolved',
-      description: 'The alert has been marked as resolved.',
-    });
+  const handleMarkResolved = async (id: string) => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/notifications/${id}/status`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'resolved' })
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to resolve notification');
+      }
+
+      setNotifications(prev => 
+        prev.map(n => n.id === id ? { ...n, status: 'resolved' as const } : n)
+      );
+      toast({
+        title: 'Alert Resolved',
+        description: 'The alert has been marked as resolved.',
+      });
+    } catch (err) {
+      console.error('Error resolving notification:', err);
+      toast({
+        title: 'Error',
+        description: 'Failed to resolve notification.',
+        variant: 'destructive'
+      });
+    }
   };
 
   // Accept farm reading handler
@@ -435,6 +493,55 @@ const AdminReports = () => {
               </div>
 
               <TabsContent value="notifications" className="space-y-6">
+                {/* Error State */}
+                {notificationsError && (
+                  <Alert variant="destructive">
+                    <AlertTriangle className="h-4 w-4" />
+                    <AlertTitle>Error</AlertTitle>
+                    <AlertDescription>{notificationsError}</AlertDescription>
+                  </Alert>
+                )}
+
+                {/* Refresh Button */}
+                <div className="flex justify-end">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleRefreshNotifications}
+                    disabled={isRefreshing}
+                  >
+                    <RefreshCw className={`h-4 w-4 mr-2 ${isRefreshing ? 'animate-spin' : ''}`} />
+                    Refresh Notifications
+                  </Button>
+                </div>
+
+                {/* Loading State */}
+                {notificationsLoading ? (
+                  <>
+                    <div className="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-4 gap-3 md:gap-4">
+                      {[1, 2, 3, 4].map((i) => (
+                        <Card key={i}>
+                          <CardContent className="p-4">
+                            <Skeleton className="h-4 w-24 mb-2" />
+                            <Skeleton className="h-8 w-12 mb-1" />
+                            <Skeleton className="h-3 w-20" />
+                          </CardContent>
+                        </Card>
+                      ))}
+                    </div>
+                    <Card>
+                      <CardHeader>
+                        <Skeleton className="h-6 w-40" />
+                      </CardHeader>
+                      <CardContent className="space-y-4">
+                        {[1, 2].map((i) => (
+                          <Skeleton key={i} className="h-32 w-full" />
+                        ))}
+                      </CardContent>
+                    </Card>
+                  </>
+                ) : (
+                  <>
                 {/* Notifications Overview */}
                 <div className="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-4 gap-3 md:gap-4">
                   <Card>
@@ -582,6 +689,8 @@ const AdminReports = () => {
                     </div>
                   </CardContent>
                 </Card>
+                </>
+                )}
               </TabsContent>
 
               <TabsContent value="disputes" className="space-y-4">
